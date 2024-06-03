@@ -64,6 +64,14 @@ python undiscord.py YOUR_AUTH_TOKEN YOUR_CHANNEL_ID
 ```sh
 python undiscord.py YOUR_AUTH_TOKEN YOUR_CHANNEL_ID --author_id YOUR_AUTHOR_ID --content "search text" --has_link --has_file --min_id MIN_ID --max_id MAX_ID --include_nsfw --include_pinned --pattern "regex pattern" --search_delay 30000 --delete_delay 1000
 ```
+## Getting Authorization Code
+Instructions to get your authorization code:
+1. Press F12 to open developer tools.
+2. Open the Network tab.
+3. Select XHR.
+4. Type `api/` in the filter box.
+5. Click on any request in the list, and then select the Headers tab in the side panel.
+6. You're looking for something like this -> `authorization: MTX5MzQ1MjAyMjU0NjA2MzM2.ROFLMAO.UvqZqBMXLpDuOY3Z456J3JRIfbk`.
 
 #### Using a Configuration File
 Create a JSON configuration file (e.g., `config.json`):
@@ -128,3 +136,4 @@ Contributions are welcome! Feel free to open issues or submit pull requests on t
 
 ## Support
 For support, please open an issue on the GitHub repository.
+
