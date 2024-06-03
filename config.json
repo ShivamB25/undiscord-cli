@@ -1,0 +1,15 @@
+{
+    "auth_token": "YOUR_AUTH_TOKEN",
+    "channel_id": "YOUR_CHANNEL_ID",
+    "author_id": "YOUR_AUTHOR_ID",
+    "content": "search text",
+    "has_link": false,
+    "has_file": false,
+    "min_id": "MIN_ID",
+    "max_id": "MAX_ID",
+    "include_nsfw": false,
+    "include_pinned": false,
+    "pattern": "regex pattern",
+    "search_delay": 30000,
+    "delete_delay": 1000
+}
