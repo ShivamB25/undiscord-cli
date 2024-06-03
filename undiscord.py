@@ -54,53 +54,61 @@ def delete_messages(auth_token, channel_id, author_id=None, content=None, has_li
     total_deleted = 0
     total_failed = 0
     consecutive_403_errors = 0
+    messages_remaining = True
 
-    while True:
-        try:
-            messages = search_messages(auth_token, channel_id, author_id, content, has_link, has_file, min_id, max_id, include_nsfw, offset)
-        except RequestException as e:
-            logger.error(f"Error searching messages: {e}")
-            break
+    while messages_remaining:
+        messages_remaining = False
+        while True:
+            try:
+                messages = search_messages(auth_token, channel_id, author_id, content, has_link, has_file, min_id, max_id, include_nsfw, offset)
+            except RequestException as e:
+                logger.error(f"Error searching messages: {e}")
+                break
 
-        if not messages.get("messages"):
-            logger.info("No more messages found.")
-            break
+            if not messages.get("messages"):
+                logger.info("No more messages found.")
+                break
 
-        for message_group in messages["messages"]:
-            for message in message_group:
-                if not include_pinned and message.get("pinned"):
-                    continue
-                if pattern and not re.search(pattern, message["content"], re.IGNORECASE):
-                    continue
-                try:
-                    response = delete_message(auth_token, channel_id, message["id"])
-                    if response.status_code == 429:
-                        retry_after = int(response.headers.get("Retry-After", 1))
-                        logger.warning(f"Rate limited. Retrying after {retry_after} seconds.")
-                        time.sleep(retry_after)
+            messages_remaining = True
+
+            for message_group in messages["messages"]:
+                for message in message_group:
+                    if not include_pinned and message.get("pinned"):
+                        continue
+                    if pattern and not re.search(pattern, message["content"], re.IGNORECASE):
+                        continue
+                    try:
                         response = delete_message(auth_token, channel_id, message["id"])
-                    if response.status_code == 204:
-                        logger.info(f"Deleted message {message['id']}")
-                        total_deleted += 1
-                        consecutive_403_errors = 0  # Reset consecutive 403 errors counter
-                    elif response.status_code == 403:
-                        logger.warning(f"Failed to delete message {message['id']} with status code 403 (Forbidden). You might not have permission to delete this message.")
+                        if response.status_code == 429:
+                            retry_after = int(response.headers.get("Retry-After", 1))
+                            logger.warning(f"Rate limited. Retrying after {retry_after} seconds.")
+                            time.sleep(retry_after)
+                            response = delete_message(auth_token, channel_id, message["id"])
+                        if response.status_code == 204:
+                            logger.info(f"Deleted message {message['id']}")
+                            total_deleted += 1
+                            consecutive_403_errors = 0  # Reset consecutive 403 errors counter
+                        elif response.status_code == 403:
+                            logger.warning(f"Failed to delete message {message['id']} with status code 403 (Forbidden). You might not have permission to delete this message.")
+                            total_failed += 1
+                            consecutive_403_errors += 1
+                            if consecutive_403_errors >= MAX_CONSECUTIVE_403_ERRORS:
+                                logger.error(f"Encountered {MAX_CONSECUTIVE_403_ERRORS} consecutive 403 errors. Stopping further attempts to delete messages from other users.")
+                                return
+                        else:
+                            logger.error(f"Failed to delete message {message['id']} with status code {response.status_code}")
+                            total_failed += 1
+                    except RequestException as e:
+                        logger.error(f"Error deleting message {message['id']}: {e}")
                         total_failed += 1
-                        consecutive_403_errors += 1
-                        if consecutive_403_errors >= MAX_CONSECUTIVE_403_ERRORS:
-                            logger.error(f"Encountered {MAX_CONSECUTIVE_403_ERRORS} consecutive 403 errors. Stopping further attempts to delete messages from other users.")
-                            return
-                    else:
-                        logger.error(f"Failed to delete message {message['id']} with status code {response.status_code}")
-                        total_failed += 1
-                except RequestException as e:
-                    logger.error(f"Error deleting message {message['id']}: {e}")
-                    total_failed += 1
-                time.sleep(delete_delay / 1000.0)
+                    time.sleep(delete_delay / 1000.0)
 
-        offset += len(messages["messages"])
-        logger.info(f"Progress: {total_deleted} messages deleted, {total_failed} messages failed.")
-        time.sleep(search_delay / 1000.0)
+            offset += len(messages["messages"])
+            logger.info(f"Progress: {total_deleted} messages deleted, {total_failed} messages failed.")
+            time.sleep(search_delay / 1000.0)
+
+        if messages_remaining:
+            logger.info("Rechecking for remaining messages to delete...")
 
 def load_config(config_file):
     with open(config_file, 'r') as file:
