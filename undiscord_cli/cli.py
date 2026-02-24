@@ -11,6 +11,7 @@ from typing import Any, Optional
 import httpx
 import typer
 from pydantic import ValidationError
+from rich.logging import RichHandler
 from typing_extensions import Annotated
 
 from undiscord_cli.client import DiscordClient, MAX_CONSECUTIVE_403, MAX_SEARCH_OFFSET
@@ -27,9 +28,26 @@ logger = logging.getLogger(__name__)
 
 
 def _configure_logging(verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        level=level,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[
+            RichHandler(
+                console=console,
+                rich_tracebacks=True,
+                show_path=False,
+                markup=False,
+            )
+        ],
+        force=True,
+    )
+    logging.getLogger("httpx").setLevel(
+        logging.WARNING if not verbose else logging.INFO
+    )
+    logging.getLogger("httpcore").setLevel(
+        logging.WARNING if not verbose else logging.INFO
     )
 
 
@@ -90,7 +108,7 @@ def _process_message(
             status_code = client.delete_message(settings.channel_id, message_id)
 
         if status_code == 204:
-            logger.info("Deleted message %s", message_id)
+            logger.debug("Deleted message %s", message_id)
             return "deleted", 0
 
         if status_code == 403:
@@ -126,7 +144,14 @@ def _delete_messages(client: DiscordClient, settings: Settings) -> tuple[int, in
     current_max_id = settings.max_id
 
     with create_progress() as progress:
-        task_id = progress.add_task("Deleting messages...", total=None)
+        mode_prefix = "[yellow]DRY RUN[/yellow] " if settings.dry_run else ""
+        task_id = progress.add_task(
+            f"{mode_prefix}Deleting messages...",
+            total=None,
+            deleted=0,
+            failed=0,
+            skipped=0,
+        )
 
         while messages_remaining:
             messages_remaining = False
@@ -151,7 +176,7 @@ def _delete_messages(client: DiscordClient, settings: Settings) -> tuple[int, in
 
                 message_groups = response.get("messages")
                 if not message_groups:
-                    logger.info("No more messages found.")
+                    logger.debug("No more messages found.")
                     break
 
                 messages_remaining = True
@@ -193,10 +218,10 @@ def _delete_messages(client: DiscordClient, settings: Settings) -> tuple[int, in
 
                         progress.update(
                             task_id,
-                            description=(
-                                "Deleting messages... "
-                                f"deleted={total_deleted}, failed={total_failed}, skipped={total_skipped}"
-                            ),
+                            description=f"{mode_prefix}Deleting messages...",
+                            deleted=total_deleted,
+                            failed=total_failed,
+                            skipped=total_skipped,
                         )
 
                 offset += len(message_groups)
@@ -214,16 +239,10 @@ def _delete_messages(client: DiscordClient, settings: Settings) -> tuple[int, in
                     current_max_id = batch_oldest_id
                     offset = 0
 
-                logger.info(
-                    "Progress: %s deleted, %s failed, %s skipped",
-                    total_deleted,
-                    total_failed,
-                    total_skipped,
-                )
                 time.sleep(settings.search_delay / 1000.0)
 
             if messages_remaining:
-                logger.info("Rechecking for remaining messages to delete...")
+                logger.debug("Rechecking for remaining messages to delete...")
 
     return total_deleted, total_failed, total_skipped
 
@@ -359,6 +378,7 @@ def delete(
             raise typer.Exit(code=0)
 
     try:
+        started_at = time.monotonic()
         with DiscordClient(settings.auth_token, dry_run=settings.dry_run) as client:
             if settings.guild_id is None:
                 try:
@@ -382,7 +402,7 @@ def delete(
         console.print("[yellow]Interrupted by user.[/yellow]")
         raise typer.Exit(code=130)
 
-    print_summary(deleted, failed, skipped)
+    print_summary(deleted, failed, skipped, time.monotonic() - started_at)
 
 
 if __name__ == "__main__":
