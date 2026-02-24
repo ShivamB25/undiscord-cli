@@ -1,139 +1,144 @@
+# undiscord-cli
 
-## Overview
-The Undiscord Command Line script allows you to bulk delete messages in a Discord channel or DM (Direct Message) using the Discord API. This script is designed to be run from the command line and supports various filtering options to target specific messages.
+Modern Python CLI for bulk deleting Discord messages in a channel or DM, with filtering, retries, rate-limit handling, and dry-run support.
 
-## Features
-- **Bulk Deletion**: Delete multiple messages in a Discord channel or DM.
-- **Filtering**: Filter messages by author ID, content, presence of links or files, date range, and more.
-- **Rate Limiting Handling**: Automatically handle Discord API rate limits with retry mechanisms.
-- **Configuration File**: Load settings from a JSON configuration file.
-- **Logging**: Detailed logging using Python's `logging` module.
-- **Graceful Exit**: Handle keyboard interrupts gracefully to stop the script.
-- **Fail-Safe Mechanism**: Stop attempting to delete messages from other users if a certain number of consecutive 403 errors are encountered.
+## Important Notice
+
+Automating user-token actions can violate Discord Terms of Service. Use this tool at your own risk and only where you are authorized to perform these actions.
+
+## Highlights
+
+- Typer-based CLI with rich help and shell completion
+- Layered configuration: CLI options > environment (.env) > defaults
+- `httpx` client with retries, backoff, and rate-limit parsing
+- Supports dry-run mode to preview actions without deleting anything
+- Safety stop on repeated `403` responses
+- Handles Discord search offset cap (`9975`) with snowflake windowing
 
 ## Requirements
-- Python 3.x
-- `requests` library: Install it using `pip install requests`
 
-## Installation
-1. Clone the repository or download the script.
-2. Install the required Python library:
-   ```sh
-   pip install requests
-   ```
+- Python `>=3.14`
+- `uv` (recommended)
+
+## Install
+
+```bash
+uv sync
+```
+
+Run help:
+
+```bash
+uv run undiscord --help
+```
+
+## Configuration
+
+Copy the example file:
+
+```bash
+cp .env.example .env
+```
+
+Set required values:
+
+```env
+UNDISCORD_AUTH_TOKEN=
+UNDISCORD_CHANNEL_ID=
+```
+
+Optional fields include:
+
+- `UNDISCORD_AUTHOR_ID`
+- `UNDISCORD_DRY_RUN`
 
 ## Usage
-The script can be run from the command line with various options. Below are the available command-line arguments and their descriptions.
 
-### Command-Line Arguments
-```sh
-usage: undiscord.py [-h] [--author_id AUTHOR_ID] [--content CONTENT] [--has_link] [--has_file] [--min_id MIN_ID] [--max_id MAX_ID] [--include_nsfw] [--include_pinned] [--pattern PATTERN] [--search_delay SEARCH_DELAY] [--delete_delay DELETE_DELAY] [--config CONFIG] auth_token channel_id
+Basic:
 
-Bulk delete messages in a Discord channel or DM.
-
-positional arguments:
-  auth_token            Your Discord authorization token
-  channel_id            Channel ID where the messages are located
-
-optional arguments:
-  -h, --help            show this help message and exit
-  --author_id AUTHOR_ID
-                        Author ID of the messages you want to delete
-  --content CONTENT     Filter messages that contain this text content
-  --has_link            Filter messages that contain a link
-  --has_file            Filter messages that contain a file
-  --min_id MIN_ID       Only delete messages after this ID
-  --max_id MAX_ID       Only delete messages before this ID
-  --include_nsfw        Include NSFW channels
-  --include_pinned      Include pinned messages
-  --pattern PATTERN     Only delete messages that match this regex pattern
-  --search_delay SEARCH_DELAY
-                        Delay between each search request (in milliseconds)
-  --delete_delay DELETE_DELAY
-                        Delay between each delete request (in milliseconds)
-  --config CONFIG       Path to configuration JSON file
+```bash
+uv run undiscord --yes
 ```
 
-### Examples
-#### Basic Usage
-```sh
-python undiscord.py YOUR_AUTH_TOKEN YOUR_CHANNEL_ID
+With explicit flags:
+
+```bash
+uv run undiscord \
+  --token "YOUR_TOKEN" \
+  --channel "CHANNEL_ID" \
+  --author-id "YOUR_USER_ID" \
+  --search-delay 30000 \
+  --delete-delay 1000 \
+  --yes
 ```
 
-#### Using Filters
-```sh
-python undiscord.py YOUR_AUTH_TOKEN YOUR_CHANNEL_ID --author_id YOUR_AUTHOR_ID --content "search text" --has_link --has_file --min_id MIN_ID --max_id MAX_ID --include_nsfw --include_pinned --pattern "regex pattern" --search_delay 30000 --delete_delay 1000
-```
-## Getting Authorization Code
-Instructions to get your authorization code:
-1. Press F12 to open developer tools.
-2. Open the Network tab.
-3. Select XHR.
-4. Type `api/` in the filter box.
-5. Click on any request in the list, and then select the Headers tab in the side panel.
-6. You're looking for something like this -> `authorization: MTX5MzQ1MjAyMjU0NjA2MzM2.ROFLMAO.UvqZqBMXLpDuOY3Z456J3JRIfbk`.
+Dry-run:
 
-#### Using a Configuration File
-Create a JSON configuration file (e.g., `config.json`):
-```json
-{
-    "auth_token": "YOUR_AUTH_TOKEN",
-    "channel_id": "YOUR_CHANNEL_ID",
-    "author_id": "YOUR_AUTHOR_ID",
-    "content": "search text",
-    "has_link": false,
-    "has_file": false,
-    "min_id": "MIN_ID",
-    "max_id": "MAX_ID",
-    "include_nsfw": false,
-    "include_pinned": false,
-    "pattern": "regex pattern",
-    "search_delay": 30000,
-    "delete_delay": 1000
-}
+```bash
+uv run undiscord --dry-run --yes
 ```
 
-Run the script with the configuration file:
-```sh
-python undiscord.py --config path/to/config.json
+Filter examples:
+
+```bash
+# Only messages with links
+uv run undiscord --has-link --yes
+
+# Only messages matching regex
+uv run undiscord --pattern "error|failed" --yes
+
+# Date/range window (snowflake IDs)
+uv run undiscord --min-id 123 --max-id 456 --yes
 ```
 
-## Detailed Description of Arguments
-- **auth_token**: Your Discord authorization token. Required.
-- **channel_id**: The ID of the channel where the messages are located. Required.
-- **--author_id**: The author ID of the messages you want to delete. Optional.
-- **--content**: Filter messages that contain this text content. Optional.
-- **--has_link**: Filter messages that contain a link. Optional.
-- **--has_file**: Filter messages that contain a file. Optional.
-- **--min_id**: Only delete messages after this ID. Optional.
-- **--max_id**: Only delete messages before this ID. Optional.
-- **--include_nsfw**: Include NSFW channels. Optional.
-- **--include_pinned**: Include pinned messages. Optional.
-- **--pattern**: Only delete messages that match this regex pattern. Optional.
-- **--search_delay**: Delay between each search request (in milliseconds). Optional. Default is 30000 ms.
-- **--delete_delay**: Delay between each delete request (in milliseconds). Optional. Default is 1000 ms.
-- **--config**: Path to a configuration JSON file. Optional.
+## CLI Options
 
-## Error Handling
-- **403 Forbidden**: This error indicates that you do not have permission to delete the message. If the script encounters 5 consecutive 403 errors, it will stop attempting to delete messages from other users and log an error.
-- **429 Too Many Requests**: This error indicates rate limiting. The script will wait for the specified retry period and then retry the request.
-- **Network Errors**: The script will log network-related errors and continue with the next message.
+Main options:
 
-## Logging
-The script uses Python's `logging` module to log detailed information about its execution. Logs include information about successful deletions, failed deletions, and any errors encountered.
+- `--token`, `-t`
+- `--channel`, `-c`
+- `--author-id`
+- `--content`
+- `--has-link / --no-has-link`
+- `--has-file / --no-has-file`
+- `--min-id`
+- `--max-id`
+- `--include-nsfw / --no-include-nsfw`
+- `--include-pinned / --no-include-pinned`
+- `--pattern`
+- `--search-delay` (ms)
+- `--delete-delay` (ms)
+- `--dry-run / --no-dry-run`
+- `--yes`, `-y`
+- `--verbose`, `-v`
 
-## Graceful Exit
-The script handles keyboard interrupts (Ctrl+C) gracefully, allowing you to stop the script without abrupt termination.
+## Entry Points
 
-## Disclaimer
-Use this script responsibly and in accordance with Discord's terms of service. The author is not responsible for any misuse of this script.
+All of these are supported:
+
+```bash
+uv run undiscord --help
+uv run python -m undiscord_cli --help
+uv run python main.py --help
+```
+
+## Project Layout
+
+```text
+undiscord_cli/
+  cli.py       # Typer command + delete flow
+  client.py    # Discord HTTP client
+  config.py    # pydantic-settings config
+  console.py   # Rich output helpers
+```
+
+## Troubleshooting
+
+- `401 Unauthorized`: token is invalid/expired
+- `403 Forbidden`: message permissions not allowed in that context
+- `429 Too Many Requests`: tool waits and retries automatically
+- No results found: verify channel ID and filters
 
 ## License
-This project is licensed under the MIT License. See the LICENSE file for details.
 
-## Contributions
-Contributions are welcome! Feel free to open issues or submit pull requests on the GitHub repository.
-
-## Support
-For support, please open an issue on the GitHub repository.
-
+MIT. See `LICENSE.md`.
