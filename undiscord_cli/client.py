@@ -65,6 +65,7 @@ class DiscordClient:
         self,
         channel_id: str,
         *,
+        guild_id: str | None,
         author_id: str | None,
         content: str | None,
         has_link: bool,
@@ -83,7 +84,16 @@ class DiscordClient:
             )
             offset = MAX_SEARCH_OFFSET
 
-        params: list[tuple[str, str | int | bool]] = [("offset", offset)]
+        params: list[tuple[str, str | int]] = [
+            ("sort_by", "timestamp"),
+            ("sort_order", "desc"),
+            ("offset", offset),
+        ]
+        path = f"/channels/{channel_id}/messages/search"
+        if guild_id is not None and guild_id != "@me":
+            path = f"/guilds/{guild_id}/messages/search"
+            params.append(("channel_id", channel_id))
+
         if author_id is not None:
             params.append(("author_id", author_id))
         if content is not None:
@@ -96,13 +106,18 @@ class DiscordClient:
             params.append(("min_id", min_id))
         if max_id is not None:
             params.append(("max_id", max_id))
-        params.append(("include_nsfw", include_nsfw))
+        if include_nsfw:
+            params.append(("include_nsfw", "true"))
 
         response = self._request_with_retry(
             "GET",
-            f"/channels/{channel_id}/messages/search",
+            path,
             params=params,
         )
+        return response.json()
+
+    def get_channel(self, channel_id: str) -> dict[str, Any]:
+        response = self._request_with_retry("GET", f"/channels/{channel_id}")
         return response.json()
 
     # ------------------------------------------------------------------

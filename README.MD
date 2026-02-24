@@ -66,6 +66,7 @@ With explicit flags:
 uv run undiscord \
   --token "YOUR_TOKEN" \
   --channel "CHANNEL_ID" \
+  --guild-id "GUILD_ID" \
   --author-id "YOUR_USER_ID" \
   --search-delay 30000 \
   --delete-delay 1000 \
@@ -97,6 +98,7 @@ Main options:
 
 - `--token`, `-t`
 - `--channel`, `-c`
+- `--guild-id`, `-g` (optional; auto-detected if omitted, use `@me` for DMs)
 - `--author-id`
 - `--content`
 - `--has-link / --no-has-link`

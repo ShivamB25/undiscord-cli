@@ -135,6 +135,7 @@ def _delete_messages(client: DiscordClient, settings: Settings) -> tuple[int, in
                 try:
                     response = client.search_messages(
                         settings.channel_id,
+                        guild_id=settings.guild_id,
                         author_id=settings.author_id,
                         content=settings.content,
                         has_link=settings.has_link,
@@ -163,7 +164,9 @@ def _delete_messages(client: DiscordClient, settings: Settings) -> tuple[int, in
                     for message in message_group:
                         msg_id = message.get("id")
                         if msg_id is not None:
-                            if batch_oldest_id is None or int(msg_id) < int(batch_oldest_id):
+                            if batch_oldest_id is None or int(msg_id) < int(
+                                batch_oldest_id
+                            ):
                                 batch_oldest_id = msg_id
 
                         result, consecutive_403_errors = _process_message(
@@ -234,6 +237,14 @@ def delete(
     channel_id: Annotated[
         Optional[str],
         typer.Option("--channel", "-c", help="Channel ID where messages are located."),
+    ] = None,
+    guild_id: Annotated[
+        Optional[str],
+        typer.Option(
+            "--guild-id",
+            "-g",
+            help="Server (guild) ID for server channels. Use @me for DMs.",
+        ),
     ] = None,
     author_id: Annotated[
         Optional[str], typer.Option("--author-id", help="Filter by author ID.")
@@ -310,6 +321,7 @@ def delete(
         cli_values: dict[str, Any] = {
             "auth_token": auth_token,
             "channel_id": channel_id,
+            "guild_id": guild_id,
             "author_id": author_id,
             "content": content,
             "has_link": has_link,
@@ -348,6 +360,23 @@ def delete(
 
     try:
         with DiscordClient(settings.auth_token, dry_run=settings.dry_run) as client:
+            if settings.guild_id is None:
+                try:
+                    channel_info = client.get_channel(settings.channel_id)
+                except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+                    console.print(
+                        "[red]Failed to auto-detect guild context from channel.[/red] "
+                        "Pass [bold]--guild-id[/bold] explicitly (or [bold]@me[/bold] for DMs)."
+                    )
+                    logger.error("Error detecting channel context: %s", exc)
+                    raise typer.Exit(code=1)
+
+                settings.guild_id = channel_info.get("guild_id") or "@me"
+                logger.info(
+                    "Resolved channel %s context as guild_id=%s",
+                    settings.channel_id,
+                    settings.guild_id,
+                )
             deleted, failed, skipped = _delete_messages(client, settings)
     except KeyboardInterrupt:
         console.print("[yellow]Interrupted by user.[/yellow]")

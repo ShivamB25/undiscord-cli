@@ -44,6 +44,7 @@ def print_config(settings: Settings) -> None:
 
     table.add_row("auth_token", masked_token)
     table.add_row("channel_id", settings.channel_id)
+    table.add_row("guild_id", str(settings.guild_id))
     table.add_row("author_id", str(settings.author_id))
     table.add_row("content", str(settings.content))
     table.add_row("has_link", str(settings.has_link))

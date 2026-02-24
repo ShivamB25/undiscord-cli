@@ -18,6 +18,7 @@ class Settings(BaseSettings):
 
     auth_token: str = Field(repr=False)
     channel_id: str
+    guild_id: str | None = None
     author_id: str | None = None
     content: str | None = None
     has_link: bool = False
