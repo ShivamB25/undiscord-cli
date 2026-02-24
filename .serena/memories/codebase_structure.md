@@ -1,0 +1,13 @@
+Top-level structure:
+- undiscord_cli/: core package
+  - cli.py: command surface + orchestration + deletion loops
+  - client.py: Discord API requests, retries, rate-limit parsing
+  - config.py: Settings model and env/.env handling
+  - console.py: Rich output helpers
+  - __main__.py: python -m entry
+  - __init__.py: package version
+- main.py: thin script entry
+- pyproject.toml: dependencies/scripts/build metadata
+- .env.example: required env schema
+- README.MD: usage and safety notes
+- AGENTS.md + undiscord_cli/AGENTS.md: project/module conventions.
