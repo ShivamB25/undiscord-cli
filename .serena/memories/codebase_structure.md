@@ -1,13 +1,13 @@
 Top-level structure:
 - undiscord_cli/: core package
-  - cli.py: command surface + orchestration + deletion loops
-  - client.py: Discord API requests, retries, rate-limit parsing
-  - config.py: Settings model and env/.env handling
-  - console.py: Rich output helpers
+  - cli.py: command surface + orchestration + deletion loops; now resolves guild context when missing
+  - client.py: Discord API requests, retries, rate-limit parsing, guild/DM search endpoint selection, channel metadata lookup (`get_channel`)
+  - config.py: Settings model and env/.env handling (`guild_id` supported)
+  - console.py: Rich output helpers (masked token, settings table includes guild_id)
   - __main__.py: python -m entry
   - __init__.py: package version
 - main.py: thin script entry
 - pyproject.toml: dependencies/scripts/build metadata
-- .env.example: required env schema
-- README.MD: usage and safety notes
+- .env.example: required env schema (`UNDISCORD_GUILD_ID` optional)
+- README.MD: usage and safety notes (includes --guild-id guidance)
 - AGENTS.md + undiscord_cli/AGENTS.md: project/module conventions.

@@ -7,4 +7,5 @@ Conventions:
 - Avoid leaking auth token; masked display only.
 - Preserve 403 safety stop and 429/rate-limit handling.
 - Preserve snowflake windowing behavior for Discord search offset cap (~9975).
-- Package manager is uv; avoid ad-hoc pip workflows in repo docs and automation.
+- Route search endpoint by context: guild channels => `/guilds/{guild_id}/messages/search` (+ `channel_id`); DMs => `/channels/{channel_id}/messages/search`.
+- Keep guild resolution behavior stable: explicit `--guild-id`/`UNDISCORD_GUILD_ID` preferred; fallback auto-detection via `get_channel` when not provided.
