@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from datetime import datetime
 from typing import Any
 
 import httpx
-
 
 DISCORD_API_BASE_URL = "https://discord.com/api/v9"
 MAX_RETRIES = 3
@@ -34,7 +34,9 @@ def to_snowflake(date_str: str) -> str:
 
 class DiscordClient:
     def __init__(self, auth_token: str, dry_run: bool = False) -> None:
-        transport = httpx.HTTPTransport(retries=1)
+        # Keep retries in the explicit request policy below.  HTTPX's native
+        # transport retry would otherwise retry connection failures twice.
+        transport = httpx.HTTPTransport()
         self._client = httpx.Client(
             base_url=DISCORD_API_BASE_URL,
             headers={
@@ -46,9 +48,8 @@ class DiscordClient:
             transport=transport,
         )
         self.dry_run = dry_run
-        self.last_retry_after_seconds = 1.0
 
-    def __enter__(self) -> "DiscordClient":
+    def __enter__(self) -> DiscordClient:
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
@@ -84,7 +85,7 @@ class DiscordClient:
             )
             offset = MAX_SEARCH_OFFSET
 
-        params: list[tuple[str, str | int]] = [
+        params: list[tuple[str, str | int | float | bool | None]] = [
             ("sort_by", "timestamp"),
             ("sort_order", "desc"),
             ("offset", offset),
@@ -113,6 +114,7 @@ class DiscordClient:
             "GET",
             path,
             params=params,
+            retry_search_index=True,
         )
         return response.json()
 
@@ -129,7 +131,6 @@ class DiscordClient:
             logger.info(
                 "Dry run: would delete message %s in channel %s", message_id, channel_id
             )
-            self.last_retry_after_seconds = 1.0
             return 204
 
         response = self._request_with_retry(
@@ -137,96 +138,148 @@ class DiscordClient:
             f"/channels/{channel_id}/messages/{message_id}",
             raise_for_status=False,
         )
-        self._parse_rate_limit(response)
         return response.status_code
-
-    # ------------------------------------------------------------------
-    # Rate-limit parsing
-    # ------------------------------------------------------------------
-
-    def _parse_rate_limit(self, response: httpx.Response) -> None:
-        """Extract retry-after from the response.
-
-        Discord sends the canonical value in the **JSON body** on 429s
-        (as a float), and also in the ``Retry-After`` header.  The body
-        value is more precise, so prefer it.
-        """
-        if response.status_code == 429:
-            try:
-                body = response.json()
-                retry = body.get("retry_after")
-                if retry is not None:
-                    self.last_retry_after_seconds = float(retry)
-                    is_global = body.get("global", False)
-                    if is_global:
-                        logger.warning(
-                            "Hit GLOBAL rate limit — waiting %.2fs",
-                            self.last_retry_after_seconds,
-                        )
-                    return
-            except Exception:
-                pass  # fall through to header
-
-        # Fallback: header value (or sensible default)
-        header_val = response.headers.get("Retry-After")
-        self.last_retry_after_seconds = float(header_val) if header_val else 1.0
 
     # ------------------------------------------------------------------
     # Retry helper
     # ------------------------------------------------------------------
 
-    def _request_with_retry(
-        self, method: str, url: str, **kwargs: Any
-    ) -> httpx.Response:
-        raise_for_status = kwargs.pop("raise_for_status", True)
+    @staticmethod
+    def _coerce_retry_after(value: object) -> float | None:
+        """Return a finite, non-negative delay or ``None`` for bad input."""
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            return None
 
+        try:
+            delay = float(value)
+        except TypeError, ValueError, OverflowError:
+            return None
+
+        if not math.isfinite(delay) or delay < 0:
+            return None
+        return delay
+
+    @classmethod
+    def _retry_after_seconds(cls, response: httpx.Response) -> float | None:
+        """Read Discord's JSON retry delay, falling back to its header."""
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+
+        if isinstance(body, dict):
+            delay = cls._coerce_retry_after(body.get("retry_after"))
+            if delay is not None:
+                return delay
+
+        return cls._coerce_retry_after(response.headers.get("Retry-After"))
+
+    @classmethod
+    def _retry_delay(
+        cls,
+        response: httpx.Response | None,
+        retry_count: int,
+        *,
+        search_indexing: bool = False,
+    ) -> float:
+        retry_after: float | None = None
+        if response is not None and response.status_code in (202, 429):
+            retry_after = cls._retry_after_seconds(response)
+        delay = (
+            retry_after
+            if retry_after is not None
+            else float(INITIAL_BACKOFF * (2**retry_count))
+        )
+
+        # A zero delay is valid for rate limits, but a zero-delay indexing
+        # response would busy-loop while Discord is still building the index.
+        if search_indexing:
+            return max(delay, 0.1)
+        return delay
+
+    def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        raise_for_status: bool = True,
+        retry_search_index: bool = False,
+        params: list[tuple[str, str | int | float | bool | None]] | None = None,
+    ) -> httpx.Response:
         for retry_count in range(MAX_RETRIES + 1):
             try:
-                response = self._client.request(method, url, **kwargs)
-                if raise_for_status:
-                    response.raise_for_status()
-                return response
-            except httpx.HTTPStatusError as exc:
-                if retry_count >= MAX_RETRIES:
-                    logger.error(
-                        "HTTP error after %s retries: %s %s returned %s",
-                        MAX_RETRIES,
-                        method,
-                        url,
-                        exc.response.status_code,
-                    )
-                    raise
-                backoff = INITIAL_BACKOFF * (2**retry_count)
+                response = self._client.request(method, url, params=params)
+                response.raise_for_status()
+            except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+                if isinstance(exc, httpx.HTTPStatusError):
+                    response = exc.response
+                    status_code = response.status_code
+                    retry_reason = f"HTTP status {status_code}"
+                    if not (status_code == 429 or 500 <= status_code < 600):
+                        if raise_for_status:
+                            raise
+                        return response
+
+                    delay = self._retry_delay(response, retry_count)
+                    if retry_count >= MAX_RETRIES:
+                        # Keep a final 429 cooldown even when this operation
+                        # cannot retry further, so a later request does not
+                        # violate the limit.
+                        if status_code == 429:
+                            time.sleep(delay)
+                        if raise_for_status:
+                            raise
+                        return response
+                else:
+                    if retry_count >= MAX_RETRIES:
+                        logger.error(
+                            "Request error after %s retries on %s %s (%s)",
+                            MAX_RETRIES,
+                            method,
+                            url,
+                            type(exc).__name__,
+                        )
+                        raise
+
+                    delay = self._retry_delay(None, retry_count)
+                    retry_reason = f"request error ({type(exc).__name__})"
+
                 logger.warning(
-                    "HTTP error on %s %s (status %s). Retrying %s/%s in %.1fs",
+                    "Retrying %s %s after %s (%s/%s) in %.1fs",
                     method,
                     url,
-                    exc.response.status_code,
+                    retry_reason,
                     retry_count + 1,
                     MAX_RETRIES,
-                    backoff,
+                    delay,
                 )
-                time.sleep(backoff)
-            except httpx.RequestError as exc:
+                time.sleep(delay)
+                continue
+
+            if retry_search_index and response.status_code == 202:
                 if retry_count >= MAX_RETRIES:
-                    logger.error(
-                        "Request error after %s retries on %s %s: %s",
-                        MAX_RETRIES,
-                        method,
-                        url,
-                        exc,
+                    raise httpx.HTTPStatusError(
+                        f"Discord message search index was not ready after {MAX_RETRIES} retries",
+                        request=response.request,
+                        response=response,
                     )
-                    raise
-                backoff = INITIAL_BACKOFF * (2**retry_count)
+
+                delay = self._retry_delay(
+                    response,
+                    retry_count,
+                    search_indexing=True,
+                )
                 logger.warning(
-                    "Request error on %s %s: %s. Retrying %s/%s in %.1fs",
+                    "Message search index is pending on %s %s. Retrying %s/%s in %.1fs",
                     method,
                     url,
-                    exc,
                     retry_count + 1,
                     MAX_RETRIES,
-                    backoff,
+                    delay,
                 )
-                time.sleep(backoff)
+                time.sleep(delay)
+                continue
+
+            return response
 
         raise RuntimeError("Retry loop exited unexpectedly.")

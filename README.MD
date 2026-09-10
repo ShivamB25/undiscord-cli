@@ -79,6 +79,19 @@ Dry-run:
 uv run undiscord --dry-run --yes
 ```
 
+Dry-run still authenticates and searches Discord; it sends no DELETE requests.
+
+Configuration precedence is CLI flags > environment variables > `.env` > JSON
+(`--config path/to/settings.json`) > defaults. JSON keys use setting names such
+as `auth_token` and `channel_id`, without the `UNDISCORD_` prefix. Explicit
+negative flags such as `--no-dry-run` override enabled values in configuration.
+
+Negative delays and invalid regular expressions are rejected before any network
+requests. Search pages use a decreasing message-ID boundary so deleting matches
+does not skip later pages or hit the 10,000-result offset limit. The client owns
+rate-limit and indexing retries; `--delete-delay` also applies after successful
+deletions. Failed runs and safety stops return a nonzero exit code.
+
 Filter examples:
 
 ```bash
@@ -110,6 +123,7 @@ Main options:
 - `--pattern`
 - `--search-delay` (ms)
 - `--delete-delay` (ms)
+- `--config` (JSON file)
 - `--dry-run / --no-dry-run`
 - `--yes`, `-y`
 - `--verbose`, `-v`
@@ -140,6 +154,25 @@ undiscord_cli/
 - `403 Forbidden`: message permissions not allowed in that context
 - `429 Too Many Requests`: tool waits and retries automatically
 - No results found: verify channel ID and filters
+
+## Development
+
+```bash
+uv sync --locked
+uv run --locked python -m unittest discover -s tests -v
+uv run --locked ruff check undiscord_cli tests main.py
+uv run --locked ruff format --check undiscord_cli tests main.py
+uv build
+```
+
+The regression suite uses local HTTP simulations, not live Discord credentials.
+
+### 0.2.0 maintenance update
+
+- Updated compatible runtime dependencies and declared Pydantic directly.
+- Consolidated configuration sources and HTTP retries; fixed deletion pacing,
+  shrinking-result pagination, and token-safe output.
+- Added regression coverage and reproducible Ruff tooling.
 
 ## License
 

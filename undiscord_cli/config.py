@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
-import os
+import re
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator
+from pydantic_settings import (
+    BaseSettings,
+    InitSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 
 class Settings(BaseSettings):
@@ -14,10 +19,13 @@ class Settings(BaseSettings):
         env_file=".env",
         env_prefix="UNDISCORD_",
         env_file_encoding="utf-8",
+        case_sensitive=False,
+        hide_input_in_errors=True,
     )
 
-    auth_token: str = Field(repr=False)
-    channel_id: str
+    config_file: Path | None = Field(default=None, exclude=True, repr=False)
+    auth_token: str = Field(min_length=1, repr=False)
+    channel_id: str = Field(min_length=1)
     guild_id: str | None = None
     author_id: str | None = None
     content: str | None = None
@@ -28,48 +36,50 @@ class Settings(BaseSettings):
     include_nsfw: bool = False
     include_pinned: bool = False
     pattern: str | None = None
-    search_delay: int = 30000
-    delete_delay: int = 1000
+    search_delay: int = Field(default=30000, ge=0)
+    delete_delay: int = Field(default=1000, ge=0)
     dry_run: bool = False
 
+    @field_validator("pattern")
     @classmethod
-    def from_config_file(cls, path: str) -> "Settings":
-        config_path = Path(path)
-        with config_path.open("r", encoding="utf-8") as file:
-            raw_config = json.load(file)
-
-        if not isinstance(raw_config, dict):
-            raise ValueError("Config file must contain a JSON object.")
-
-        config_values: dict[str, Any] = {
-            key: value for key, value in raw_config.items() if key in cls.model_fields
-        }
-
-        dotenv_values = cls._read_dotenv_file()
-
-        for field_name in cls.model_fields:
-            env_key = f"UNDISCORD_{field_name.upper()}"
-            if env_key in os.environ or env_key in dotenv_values:
-                config_values.pop(field_name, None)
-
-        return cls(**config_values)
+    def validate_pattern(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                re.compile(value)
+            except re.error as exc:
+                raise ValueError("pattern must be a valid regular expression") from exc
+        return value
 
     @classmethod
-    def _read_dotenv_file(cls) -> dict[str, str]:
-        env_file = cls.model_config.get("env_file")
-        if not env_file:
-            return {}
+    @override
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        config_file = init_settings().get("config_file")
+        filtered_json_config: dict[str, Any] = {}
 
-        env_path = Path(str(env_file))
-        if not env_path.exists():
-            return {}
+        if config_file is not None:
+            with Path(config_file).open("r", encoding="utf-8") as file:
+                raw_config = json.load(file)
 
-        values: dict[str, str] = {}
-        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            values[key.strip()] = value.strip().strip('"').strip("'")
+            if not isinstance(raw_config, dict):
+                raise ValueError("Config file must contain a JSON object.")
 
-        return values
+            filtered_json_config = {
+                key: value
+                for key, value in raw_config.items()
+                if key in settings_cls.model_fields and key != "config_file"
+            }
+
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            file_secret_settings,
+            InitSettingsSource(settings_cls, filtered_json_config),
+        )

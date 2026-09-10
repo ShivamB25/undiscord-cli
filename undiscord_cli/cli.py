@@ -1,20 +1,17 @@
 from __future__ import annotations
 
-import json
 import logging
-import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Annotated, Any
 
 import httpx
 import typer
 from pydantic import ValidationError
 from rich.logging import RichHandler
-from typing_extensions import Annotated
 
-from undiscord_cli.client import DiscordClient, MAX_CONSECUTIVE_403, MAX_SEARCH_OFFSET
+from undiscord_cli.client import MAX_CONSECUTIVE_403, DiscordClient
 from undiscord_cli.config import Settings
 from undiscord_cli.console import console, create_progress, print_config, print_summary
 
@@ -22,6 +19,7 @@ app = typer.Typer(
     name="undiscord",
     help="Bulk delete Discord messages from channels and DMs.",
     rich_markup_mode="rich",
+    pretty_exceptions_show_locals=False,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,44 +49,18 @@ def _configure_logging(verbose: bool) -> None:
     )
 
 
-def _build_settings(cli_values: dict[str, Any], config_path: Optional[str]) -> Settings:
-    cli_overrides = {
-        key: value for key, value in cli_values.items() if value is not None
-    }
-
-    if not config_path:
-        return Settings(**cli_overrides)
-
-    with Path(config_path).open("r", encoding="utf-8") as file:
-        raw_config = json.load(file)
-
-    if not isinstance(raw_config, dict):
-        raise ValueError("Config file must contain a JSON object.")
-
-    config_values: dict[str, Any] = {
-        key: value for key, value in raw_config.items() if key in Settings.model_fields
-    }
-
-    dotenv_values = Settings._read_dotenv_file()
-    for field_name in Settings.model_fields:
-        env_key = f"UNDISCORD_{field_name.upper()}"
-        if env_key in os.environ or env_key in dotenv_values:
-            config_values.pop(field_name, None)
-
-    return Settings(**config_values, **cli_overrides)
-
-
 def _process_message(
     client: DiscordClient,
     settings: Settings,
     message: dict[str, Any],
     consecutive_403_errors: int,
+    pattern: re.Pattern[str] | None = None,
 ) -> tuple[str, int]:
     if not settings.include_pinned and message.get("pinned"):
         return "skipped", consecutive_403_errors
 
     content = message.get("content", "")
-    if settings.pattern and not re.search(settings.pattern, content, re.IGNORECASE):
+    if pattern is not None and not pattern.search(content):
         return "skipped", consecutive_403_errors
 
     message_id = message.get("id")
@@ -97,51 +69,48 @@ def _process_message(
 
     try:
         status_code = client.delete_message(settings.channel_id, message_id)
-        if status_code == 429:
-            retry_after = client.last_retry_after_seconds
-            logger.warning(
-                "Rate limited while deleting %s. Retrying after %.2f seconds.",
-                message_id,
-                retry_after,
-            )
-            time.sleep(retry_after)
-            status_code = client.delete_message(settings.channel_id, message_id)
-
-        if status_code == 204:
-            logger.debug("Deleted message %s", message_id)
-            return "deleted", 0
-
-        if status_code == 403:
-            logger.warning(
-                "Failed to delete message %s with status code 403 (Forbidden). You might not have permission.",
-                message_id,
-            )
-            time.sleep(settings.delete_delay / 1000.0)
-            return "failed", consecutive_403_errors + 1
-
-        logger.error(
-            "Failed to delete message %s with status code %s", message_id, status_code
-        )
-        time.sleep(settings.delete_delay / 1000.0)
-        return "failed", consecutive_403_errors
     except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-        logger.error("Error deleting message %s: %s", message_id, exc)
-        time.sleep(settings.delete_delay / 1000.0)
+        logger.error("Error deleting message %s: %s", message_id, type(exc).__name__)
         return "failed", consecutive_403_errors
+    finally:
+        if not settings.dry_run:
+            time.sleep(settings.delete_delay / 1000.0)
+
+    if status_code == 204:
+        logger.debug("Deleted message %s", message_id)
+        return "deleted", 0
+
+    if status_code == 403:
+        logger.warning(
+            "Failed to delete message %s with status code 403 (Forbidden). You might not have permission.",
+            message_id,
+        )
+        return "failed", consecutive_403_errors + 1
+
+    if status_code == 401:
+        logger.error(
+            "Failed to delete message %s with status code 401 (Unauthorized).",
+            message_id,
+        )
+        return "unauthorized", consecutive_403_errors
+
+    logger.error(
+        "Failed to delete message %s with status code %s", message_id, status_code
+    )
+    return "failed", consecutive_403_errors
 
 
 def _delete_messages(client: DiscordClient, settings: Settings) -> tuple[int, int, int]:
-    offset = 0
     total_deleted = 0
     total_failed = 0
     total_skipped = 0
     consecutive_403_errors = 0
-    messages_remaining = True
-
-    # Snowflake windowing: when offset hits Discord's hard cap (9975),
-    # we reset offset to 0 and set max_id to the oldest message ID from
-    # the last batch.  This lets us page through >10k messages.
     current_max_id = settings.max_id
+    pattern = (
+        re.compile(settings.pattern, re.IGNORECASE)
+        if settings.pattern is not None
+        else None
+    )
 
     with create_progress() as progress:
         mode_prefix = "[yellow]DRY RUN[/yellow] " if settings.dry_run else ""
@@ -153,96 +122,120 @@ def _delete_messages(client: DiscordClient, settings: Settings) -> tuple[int, in
             skipped=0,
         )
 
-        while messages_remaining:
-            messages_remaining = False
+        while True:
+            try:
+                response = client.search_messages(
+                    settings.channel_id,
+                    guild_id=settings.guild_id,
+                    author_id=settings.author_id,
+                    content=settings.content,
+                    has_link=settings.has_link,
+                    has_file=settings.has_file,
+                    min_id=settings.min_id,
+                    max_id=current_max_id,
+                    include_nsfw=settings.include_nsfw,
+                    offset=0,
+                )
+            except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+                logger.error("Error searching messages: %s", type(exc).__name__)
+                progress.stop_task(task_id)
+                raise
 
-            while True:
-                try:
-                    response = client.search_messages(
-                        settings.channel_id,
-                        guild_id=settings.guild_id,
-                        author_id=settings.author_id,
-                        content=settings.content,
-                        has_link=settings.has_link,
-                        has_file=settings.has_file,
-                        min_id=settings.min_id,
-                        max_id=current_max_id,
-                        include_nsfw=settings.include_nsfw,
-                        offset=offset,
+            message_groups = response.get("messages")
+            if not message_groups:
+                logger.debug("No more messages found.")
+                break
+
+            page_ids: set[str] = set()
+            cursor_ids: list[int] = []
+            upper_bound = int(current_max_id) if current_max_id is not None else None
+
+            for message_group in message_groups:
+                messages = (
+                    (message_group,)
+                    if isinstance(message_group, dict)
+                    else message_group
+                )
+                for message in messages:
+                    if message.get("hit") is False:
+                        continue
+
+                    message_channel_id = message.get("channel_id")
+                    if message_channel_id is not None and str(
+                        message_channel_id
+                    ) != str(settings.channel_id):
+                        continue
+
+                    raw_message_id = message.get("id")
+                    message_key = (
+                        str(raw_message_id) if raw_message_id is not None else None
                     )
-                except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-                    logger.error("Error searching messages: %s", exc)
-                    break
+                    if message_key is not None:
+                        if message_key in page_ids:
+                            continue
+                        page_ids.add(message_key)
 
-                message_groups = response.get("messages")
-                if not message_groups:
-                    logger.debug("No more messages found.")
-                    break
+                        try:
+                            snowflake = int(message_key)
+                        except ValueError:
+                            raise RuntimeError(
+                                "Search returned an invalid message ID."
+                            ) from None
+                        if upper_bound is not None and snowflake >= upper_bound:
+                            continue
+                        cursor_ids.append(snowflake)
 
-                messages_remaining = True
-
-                # Track the oldest message ID in this batch for
-                # snowflake windowing when we hit the offset cap.
-                batch_oldest_id: str | None = None
-
-                for message_group in message_groups:
-                    for message in message_group:
-                        msg_id = message.get("id")
-                        if msg_id is not None:
-                            if batch_oldest_id is None or int(msg_id) < int(
-                                batch_oldest_id
-                            ):
-                                batch_oldest_id = msg_id
-
-                        result, consecutive_403_errors = _process_message(
-                            client=client,
-                            settings=settings,
-                            message=message,
-                            consecutive_403_errors=consecutive_403_errors,
-                        )
-
-                        if result == "deleted":
-                            total_deleted += 1
-                        elif result == "skipped":
-                            total_skipped += 1
-                        else:
-                            total_failed += 1
-
-                        if consecutive_403_errors >= MAX_CONSECUTIVE_403:
-                            logger.error(
-                                "Encountered %s consecutive 403 errors. Stopping for safety.",
-                                MAX_CONSECUTIVE_403,
-                            )
-                            progress.stop_task(task_id)
-                            return total_deleted, total_failed, total_skipped
-
-                        progress.update(
-                            task_id,
-                            description=f"{mode_prefix}Deleting messages...",
-                            deleted=total_deleted,
-                            failed=total_failed,
-                            skipped=total_skipped,
-                        )
-
-                offset += len(message_groups)
-
-                # Snowflake windowing: if offset is about to exceed
-                # Discord's hard cap, reset to 0 and use the oldest
-                # message ID as max_id to continue from that point.
-                if offset >= MAX_SEARCH_OFFSET and batch_oldest_id is not None:
-                    logger.info(
-                        "Offset reached %s (Discord cap). Switching to "
-                        "snowflake windowing with max_id=%s.",
-                        MAX_SEARCH_OFFSET,
-                        batch_oldest_id,
+                    result, consecutive_403_errors = _process_message(
+                        client=client,
+                        settings=settings,
+                        message=message,
+                        consecutive_403_errors=consecutive_403_errors,
+                        pattern=pattern,
                     )
-                    current_max_id = batch_oldest_id
-                    offset = 0
 
+                    if result == "deleted":
+                        total_deleted += 1
+                    elif result == "skipped":
+                        total_skipped += 1
+                    else:
+                        total_failed += 1
+
+                    progress.update(
+                        task_id,
+                        description=f"{mode_prefix}Deleting messages...",
+                        deleted=total_deleted,
+                        failed=total_failed,
+                        skipped=total_skipped,
+                    )
+
+                    if result == "unauthorized":
+                        logger.error(
+                            "Discord authorization failed. Stopping for safety."
+                        )
+                        progress.stop_task(task_id)
+                        return total_deleted, total_failed, total_skipped
+
+                    if consecutive_403_errors >= MAX_CONSECUTIVE_403:
+                        logger.error(
+                            "Encountered %s consecutive 403 errors. Stopping for safety.",
+                            MAX_CONSECUTIVE_403,
+                        )
+                        progress.stop_task(task_id)
+                        return total_deleted, total_failed, total_skipped
+
+            if not cursor_ids:
+                if page_ids:
+                    raise RuntimeError(
+                        "Search cursor did not decrease; stopping safely."
+                    )
+                logger.debug("No actual search hits with usable IDs found.")
+                break
+
+            next_max_id = str(min(cursor_ids))
+
+            current_max_id = next_max_id
+            if settings.search_delay > 0:
                 time.sleep(settings.search_delay / 1000.0)
-
-            if messages_remaining:
-                logger.debug("Rechecking for remaining messages to delete...")
 
     return total_deleted, total_failed, total_skipped
 
@@ -250,15 +243,15 @@ def _delete_messages(client: DiscordClient, settings: Settings) -> tuple[int, in
 @app.command()
 def delete(
     auth_token: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--token", "-t", help="Discord authorization token."),
     ] = None,
     channel_id: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--channel", "-c", help="Channel ID where messages are located."),
     ] = None,
     guild_id: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--guild-id",
             "-g",
@@ -266,65 +259,65 @@ def delete(
         ),
     ] = None,
     author_id: Annotated[
-        Optional[str], typer.Option("--author-id", help="Filter by author ID.")
+        str | None, typer.Option("--author-id", help="Filter by author ID.")
     ] = None,
     content: Annotated[
-        Optional[str], typer.Option("--content", help="Filter by text content.")
+        str | None, typer.Option("--content", help="Filter by text content.")
     ] = None,
     has_link: Annotated[
-        Optional[bool],
+        bool | None,
         typer.Option(
             "--has-link/--no-has-link", help="Filter messages containing links."
         ),
     ] = None,
     has_file: Annotated[
-        Optional[bool],
+        bool | None,
         typer.Option(
             "--has-file/--no-has-file", help="Filter messages containing files."
         ),
     ] = None,
     min_id: Annotated[
-        Optional[str], typer.Option("--min-id", help="Only delete after this ID.")
+        str | None, typer.Option("--min-id", help="Only delete after this ID.")
     ] = None,
     max_id: Annotated[
-        Optional[str], typer.Option("--max-id", help="Only delete before this ID.")
+        str | None, typer.Option("--max-id", help="Only delete before this ID.")
     ] = None,
     include_nsfw: Annotated[
-        Optional[bool],
+        bool | None,
         typer.Option(
             "--include-nsfw/--no-include-nsfw", help="Include NSFW channels in search."
         ),
     ] = None,
     include_pinned: Annotated[
-        Optional[bool],
+        bool | None,
         typer.Option(
             "--include-pinned/--no-include-pinned", help="Include pinned messages."
         ),
     ] = None,
     pattern: Annotated[
-        Optional[str], typer.Option("--pattern", help="Regex pattern filter.")
+        str | None, typer.Option("--pattern", help="Regex pattern filter.")
     ] = None,
     search_delay: Annotated[
-        Optional[int],
+        int | None,
         typer.Option(
             "--search-delay", help="Delay between search calls in milliseconds."
         ),
     ] = None,
     delete_delay: Annotated[
-        Optional[int],
+        int | None,
         typer.Option(
             "--delete-delay", help="Delay between delete calls in milliseconds."
         ),
     ] = None,
     config: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option("--config", help="Path to JSON config file."),
     ] = None,
     dry_run: Annotated[
-        Optional[bool],
+        bool | None,
         typer.Option(
             "--dry-run/--no-dry-run",
-            help="Simulate deletions without making API calls.",
+            help="Search and report matches without deleting messages.",
         ),
     ] = None,
     yes: Annotated[
@@ -354,19 +347,18 @@ def delete(
             "delete_delay": delete_delay,
             "dry_run": dry_run,
         }
-
-        settings = _build_settings(cli_values, str(config) if config else None)
+        settings = Settings(
+            config_file=config,
+            **{key: value for key, value in cli_values.items() if value is not None},
+        )
     except FileNotFoundError:
-        console.print(f"[red]Config file not found:[/red] {config}")
+        console.print("[red]Config file not found.[/red]")
         raise typer.Exit(code=1)
-    except json.JSONDecodeError as exc:
-        console.print(f"[red]Invalid JSON in config file:[/red] {exc}")
+    except OSError:
+        console.print("[red]Unable to read config file.[/red]")
         raise typer.Exit(code=1)
-    except ValidationError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise typer.Exit(code=1)
-    except ValueError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
+    except ValidationError, ValueError:
+        console.print("[red]Configuration error.[/red]")
         raise typer.Exit(code=1)
 
     print_config(settings)
@@ -383,12 +375,25 @@ def delete(
             if settings.guild_id is None:
                 try:
                     channel_info = client.get_channel(settings.channel_id)
-                except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-                    console.print(
-                        "[red]Failed to auto-detect guild context from channel.[/red] "
-                        "Pass [bold]--guild-id[/bold] explicitly (or [bold]@me[/bold] for DMs)."
+                except httpx.HTTPStatusError as exc:
+                    status_code = exc.response.status_code
+                    if status_code == 401:
+                        console.print(
+                            "[red]Discord authorization failed (401 Unauthorized).[/red]"
+                        )
+                    else:
+                        console.print(
+                            "[red]Failed to auto-detect guild context from channel.[/red]"
+                        )
+                    logger.error(
+                        "Error detecting channel context: %s", type(exc).__name__
                     )
-                    logger.error("Error detecting channel context: %s", exc)
+                    raise typer.Exit(code=1)
+                except httpx.RequestError:
+                    console.print(
+                        "[red]Failed to auto-detect guild context from channel.[/red]"
+                    )
+                    logger.error("Error detecting channel context: network error")
                     raise typer.Exit(code=1)
 
                 settings.guild_id = channel_info.get("guild_id") or "@me"
@@ -401,8 +406,25 @@ def delete(
     except KeyboardInterrupt:
         console.print("[yellow]Interrupted by user.[/yellow]")
         raise typer.Exit(code=130)
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        if status_code == 401:
+            console.print("[red]Discord authorization failed (401 Unauthorized).[/red]")
+        else:
+            console.print(f"[red]Discord request failed (HTTP {status_code}).[/red]")
+        raise typer.Exit(code=1)
+    except httpx.RequestError:
+        console.print("[red]Discord request failed due to a network error.[/red]")
+        raise typer.Exit(code=1)
+    except RuntimeError, ValueError:
+        console.print(
+            "[red]Search returned invalid data or could not advance safely.[/red]"
+        )
+        raise typer.Exit(code=1)
 
     print_summary(deleted, failed, skipped, time.monotonic() - started_at)
+    if failed:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
