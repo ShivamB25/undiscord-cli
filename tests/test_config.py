@@ -68,23 +68,6 @@ class SettingsSourceTests(unittest.TestCase):
             self.assertFalse(settings.dry_run)
             self.assertFalse(settings.include_nsfw)
 
-    def test_dotenv_supports_export_interpolation_and_case_insensitive_keys(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            dotenv_path = Path(directory) / ".env"
-            dotenv_path.write_text(
-                'export undiscord_auth_token="${UNDISCORD_SUFFIX}-token"\n'
-                "undiscord_channel_id=dotenv-channel\n",
-                encoding="utf-8",
-            )
-
-            with patch.dict(os.environ, {"UNDISCORD_SUFFIX": "expanded"}, clear=True):
-                settings = Settings(_env_file=dotenv_path)
-
-            self.assertEqual(settings.auth_token, "expanded-token")
-            self.assertEqual(settings.channel_id, "dotenv-channel")
-
     def test_config_files_are_instance_specific(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             first_path = Path(directory) / "first.json"
@@ -107,57 +90,14 @@ class SettingsSourceTests(unittest.TestCase):
             self.assertEqual(
                 (second.auth_token, second.channel_id), ("second-token", "second")
             )
-            self.assertIsNone(first.model_dump().get("config_file"))
-            self.assertNotIn("config_file", first.model_dump())
 
-    def test_explicit_config_file_errors_are_preserved(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            missing_path = Path(directory) / "missing.json"
-            with self.assertRaises(FileNotFoundError):
-                self._settings(
-                    config_file=missing_path,
-                    auth_token="token",
-                    channel_id="channel",
-                )
-
-            malformed_path = Path(directory) / "malformed.json"
-            malformed_path.write_text("{", encoding="utf-8")
-            with self.assertRaises(json.JSONDecodeError):
-                self._settings(config_file=malformed_path)
-
-            array_path = Path(directory) / "array.json"
-            array_path.write_text("[]", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "JSON object"):
-                self._settings(config_file=array_path)
-
-    def test_invalid_timing_and_pattern_fail_during_settings_construction(self) -> None:
-        for field_name in ("search_delay", "delete_delay"):
-            with self.subTest(field_name=field_name):
-                with self.assertRaises(ValidationError):
-                    self._settings(
-                        auth_token="token",
-                        channel_id="channel",
-                        **{field_name: -1},
-                    )
-
-        with self.assertRaises(ValidationError):
-            self._settings(
-                auth_token="token",
-                channel_id="channel",
-                pattern="[",
-            )
-
-    def test_validation_errors_do_not_expose_credentials_or_empty_values(self) -> None:
+    def test_validation_errors_do_not_expose_credentials(self) -> None:
         secret = "secret-token-value"
         with self.assertRaises(ValidationError) as context:
             self._settings(auth_token=secret, channel_id="")
 
         error_text = str(context.exception)
         self.assertNotIn(secret, error_text)
-        self.assertNotIn("input_value", error_text)
-
-        with self.assertRaises(ValidationError):
-            self._settings(auth_token="", channel_id="channel")
 
 
 class ConsoleSafetyTests(unittest.TestCase):

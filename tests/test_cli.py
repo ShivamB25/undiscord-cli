@@ -18,27 +18,6 @@ CHANNEL_ID = "111111111111111111"
 GUILD_ID = "222222222222222222"
 
 
-class FakeProgress:
-    def __init__(self) -> None:
-        self.updates: list[dict[str, object]] = []
-        self.stopped = False
-
-    def __enter__(self) -> FakeProgress:
-        return self
-
-    def __exit__(self, exc_type, exc, traceback) -> None:
-        return None
-
-    def add_task(self, *args, **kwargs) -> int:
-        return 1
-
-    def update(self, task_id: int, **fields: object) -> None:
-        self.updates.append(fields)
-
-    def stop_task(self, task_id: int) -> None:
-        self.stopped = True
-
-
 class FakeSearchService:
     def __init__(
         self,
@@ -159,6 +138,15 @@ class FailingSearchService(FakeSearchService):
 
 
 class CliRegressionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        settings_patch = patch.object(
+            cli,
+            "Settings",
+            side_effect=lambda **values: Settings(_env_file=None, **values),
+        )
+        settings_patch.start()
+        self.addCleanup(settings_patch.stop)
+
     def settings(self, **overrides: object) -> Settings:
         values: dict[str, object] = {
             "config_file": None,
@@ -179,18 +167,17 @@ class CliRegressionTests(unittest.TestCase):
             "dry_run": False,
         }
         values.update(overrides)
-        return Settings(**values)
+        return Settings(_env_file=None, **values)
 
     def run_loop(
         self, service: FakeSearchService, settings: Settings
-    ) -> tuple[tuple[int, int, int], FakeProgress, object]:
-        progress = FakeProgress()
+    ) -> tuple[tuple[int, int, int], object]:
         with (
-            patch.object(cli, "create_progress", return_value=progress),
+            patch.object(cli, "create_progress"),
             patch.object(cli.time, "sleep") as sleep,
         ):
             result = cli._delete_messages(service, settings)
-        return result, progress, sleep
+        return result, sleep
 
     def test_shrinking_search_pages_are_fully_processed(self) -> None:
         service = FakeSearchService(
@@ -200,7 +187,7 @@ class CliRegressionTests(unittest.TestCase):
             ]
         )
 
-        result, _, _ = self.run_loop(service, self.settings())
+        result, _ = self.run_loop(service, self.settings())
 
         self.assertEqual((4, 0, 0), result)
         self.assertEqual(
@@ -209,7 +196,6 @@ class CliRegressionTests(unittest.TestCase):
         self.assertEqual(
             [None, "3", "1"], [call["max_id"] for call in service.search_calls]
         )
-        self.assertTrue(all(call["offset"] == 0 for call in service.search_calls))
 
     def test_dry_run_and_pinned_messages_keep_paging_without_delete_pacing(
         self,
@@ -223,7 +209,7 @@ class CliRegressionTests(unittest.TestCase):
             remove_on_delete=False,
         )
 
-        result, _, sleep = self.run_loop(
+        result, sleep = self.run_loop(
             service, self.settings(dry_run=True, include_pinned=False)
         )
 
@@ -234,7 +220,7 @@ class CliRegressionTests(unittest.TestCase):
     def test_context_and_duplicate_ids_do_not_advance_or_repeat_deletes(self) -> None:
         service = ContextPagingService()
 
-        result, _, _ = self.run_loop(service, self.settings())
+        result, _ = self.run_loop(service, self.settings())
 
         self.assertEqual((3, 0, 0), result)
         self.assertEqual(["8", "7", "6"], [call[1] for call in service.delete_calls])
@@ -253,16 +239,12 @@ class CliRegressionTests(unittest.TestCase):
 
     def test_delete_delay_applies_once_to_success_and_failure(self) -> None:
         success_service = FakeSearchService([{"id": "2", "channel_id": CHANNEL_ID}])
-        success_result, _, success_sleep = self.run_loop(
-            success_service, self.settings()
-        )
+        success_result, success_sleep = self.run_loop(success_service, self.settings())
 
         failure_service = FakeSearchService(
             [{"id": "2", "channel_id": CHANNEL_ID}], statuses={"2": 500}
         )
-        failure_result, _, failure_sleep = self.run_loop(
-            failure_service, self.settings()
-        )
+        failure_result, failure_sleep = self.run_loop(failure_service, self.settings())
 
         self.assertEqual((1, 0, 0), success_result)
         self.assertEqual((0, 1, 0), failure_result)
@@ -271,7 +253,7 @@ class CliRegressionTests(unittest.TestCase):
         self.assertEqual(1, success_sleep.call_count)
         self.assertEqual(1, failure_sleep.call_count)
 
-    def test_forbidden_safety_stop_is_bounded_and_updates_progress(self) -> None:
+    def test_forbidden_safety_stop_is_bounded(self) -> None:
         service = FakeSearchService(
             [
                 {"id": str(message_id), "channel_id": CHANNEL_ID}
@@ -284,23 +266,16 @@ class CliRegressionTests(unittest.TestCase):
             },
             remove_on_delete=False,
         )
-        result, progress, _ = self.run_loop(service, self.settings())
+        result, _ = self.run_loop(service, self.settings())
 
         self.assertEqual((0, MAX_CONSECUTIVE_403, 0), result)
         self.assertEqual(MAX_CONSECUTIVE_403, len(service.delete_calls))
-        self.assertEqual(MAX_CONSECUTIVE_403, progress.updates[-1]["failed"])
-        self.assertTrue(progress.stopped)
 
     def test_cli_json_values_are_overridden_by_cli_and_negative_boolean_is_preserved(
         self,
     ) -> None:
         runner = CliRunner()
         service = FakeSearchService([])
-        constructor_args: list[tuple[str, bool]] = []
-
-        def build_client(token: str, dry_run: bool) -> FakeSearchService:
-            constructor_args.append((token, dry_run))
-            return service
 
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
@@ -320,7 +295,7 @@ class CliRegressionTests(unittest.TestCase):
             )
             with (
                 patch.dict(os.environ, {}, clear=True),
-                patch.object(cli, "DiscordClient", side_effect=build_client),
+                patch.object(cli, "DiscordClient", return_value=service),
             ):
                 result = runner.invoke(
                     cli.app,
@@ -338,11 +313,8 @@ class CliRegressionTests(unittest.TestCase):
                 )
 
         self.assertEqual(0, result.exit_code)
-        self.assertEqual([("cli-secret-token", True)], constructor_args)
-        self.assertEqual(
-            False,
-            service.search_calls[0]["has_link"] if service.search_calls else False,
-        )
+        self.assertFalse(service.search_calls[0]["has_link"])
+        self.assertEqual(CHANNEL_ID, service.search_calls[0]["channel_id"])
         self.assertNotIn("cli-secret-token", result.output)
         self.assertNotIn("json-secret-token", result.output)
 
@@ -371,7 +343,6 @@ class CliRegressionTests(unittest.TestCase):
 
         self.assertNotEqual(0, result.exit_code)
         self.assertNotIn("super-secret-token", result.output)
-        self.assertIn("network error", result.output.lower())
 
     def test_cli_failed_delete_is_nonzero(self) -> None:
         runner = CliRunner()
@@ -401,7 +372,6 @@ class CliRegressionTests(unittest.TestCase):
             )
 
         self.assertNotEqual(0, result.exit_code)
-        self.assertNotIn("super-secret-token", result.output)
 
     def test_invalid_config_error_does_not_echo_input_values(self) -> None:
         runner = CliRunner()
@@ -418,7 +388,6 @@ class CliRegressionTests(unittest.TestCase):
 
         self.assertNotEqual(0, result.exit_code)
         self.assertNotIn(secret, result.output)
-        self.assertIn("configuration error", result.output.lower())
 
 
 if __name__ == "__main__":

@@ -22,11 +22,6 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["undiscord_cli"]
 
-[dependency-groups]
-dev = [
-    "ruff>=0.16.7",
-]
-
 [tool.ruff]
 target-version = "py314"
 
